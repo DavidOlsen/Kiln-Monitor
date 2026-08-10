@@ -27,8 +27,8 @@ jobs:
           RELEASE_TAG="${{ github.event.release.tag_name }}"
           sed -i "s|'-DOTA_VERSION=\"local_development\"'|'-DOTA_VERSION=\"${RELEASE_TAG}\"'|" platformio.ini
 
-      - name: Set SPIFFS version from release tag
-        run: echo "${{ github.event.release.tag_name }}" > data/spiffs_version.txt
+      - name: Set LittleFS version from release tag
+        run: echo "${{ github.event.release.tag_name }}" > data/LittleFS_version.txt
 
       - name: Build firmware
         run: platformio run --environment e32r40t_gfx
@@ -52,14 +52,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ github.event.release.upload_url }}
-          asset_path: .pio/build/e32r40t_gfx/spiffs.bin
+          asset_path: .pio/build/e32r40t_gfx/littlefs.bin
           asset_name: e32r40t_gfx_spiffs.bin
           asset_content_type: application/octet-stream
 
       - name: Append MD5 checksums to release notes
         run: |
           FIRMWARE_MD5=$(md5sum .pio/build/e32r40t_gfx/firmware.bin | awk '{print $1}')
-          LITTLEFS_MD5=$(md5sum .pio/build/e32r40t_gfx/spiffs.bin | awk '{print $1}')
+          LITTLEFS_MD5=$(md5sum .pio/build/e32r40t_gfx/littlefs.bin | awk '{print $1}')
           RELEASE_ID="${{ github.event.release.id }}"
           EXISTING_BODY=$(curl -s \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
