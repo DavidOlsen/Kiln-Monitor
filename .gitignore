@@ -1,0 +1,5 @@
+.pio
+.vscode/
+
+# Ignore personal credentials
+src/secrets.h

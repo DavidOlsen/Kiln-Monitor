@@ -1,0 +1,73 @@
+name: Build and Release Firmware
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Set OTA version from release tag
+        run: |
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          sed -i "s|'-DOTA_VERSION=\"local_development\"'|'-DOTA_VERSION=\"${RELEASE_TAG}\"'|" platformio.ini
+
+      - name: Set SPIFFS version from release tag
+        run: echo "${{ github.event.release.tag_name }}" > data/spiffs_version.txt
+
+      - name: Build firmware
+        run: platformio run --environment e32r40t_gfx
+
+      - name: Build SPIFFS image
+        run: platformio run --target buildfs --environment e32r40t_gfx
+
+      - name: Upload firmware to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: .pio/build/e32r40t_gfx/firmware.bin
+          asset_name: e32r40t_gfx_firmware.bin
+          asset_content_type: application/octet-stream
+
+      - name: Upload SPIFFS image to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: .pio/build/e32r40t_gfx/spiffs.bin
+          asset_name: e32r40t_gfx_spiffs.bin
+          asset_content_type: application/octet-stream
+
+      - name: Append MD5 checksums to release notes
+        run: |
+          FIRMWARE_MD5=$(md5sum .pio/build/e32r40t_gfx/firmware.bin | awk '{print $1}')
+          LITTLEFS_MD5=$(md5sum .pio/build/e32r40t_gfx/spiffs.bin | awk '{print $1}')
+          RELEASE_ID="${{ github.event.release.id }}"
+          EXISTING_BODY=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}" \
+            | jq -r .body)
+          NEW_BODY=$(printf '%s\n\nFirmware MD5: %s\nLittleFS MD5: %s' "$EXISTING_BODY" "$FIRMWARE_MD5" "$LITTLEFS_MD5")
+          curl -s -X PATCH \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg body "$NEW_BODY" '{body: $body}')" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}"

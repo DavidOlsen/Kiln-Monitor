@@ -1,0 +1,33 @@
+<!DOCTYPE HTML>
+<html>
+
+<head>
+    <title>ESP32 Kiln Monitor</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <link rel="icon" type="image/x-icon" href="/favicon/favicon.ico">
+    <link rel="manifest" href="/favicon/site.webmanifest">
+    <link rel="stylesheet" type="text/css" href="style.css">
+</head>
+
+<body>
+    <div class="topnav">
+        <h1>ESP32 Kiln Monitor</h1>
+    </div>
+    <div class="content">
+        <div class="card-grid">
+            <div class="card">
+                <button onclick="loadStatus()" class="button-main">Status</button>
+                <br>
+                <button onclick="loadWiFiManager()" class="button-main">WiFi Manager</button>
+                <br>
+                <button onclick="loadInfluxDbManager()" class="button-main">InfluxDB Manager</button>
+                <br>
+                <button onclick="window.location.href='/firmware-update'" class="button-main">Firmware Update</button>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+
+</html>

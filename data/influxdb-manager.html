@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>InfluxDB Manager</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8">
+  <link rel="icon" type="image/x-icon" href="/favicon/favicon.ico">
+  <link rel="manifest" href="/favicon/site.webmanifest">
+  <link rel="stylesheet" type="text/css" href="style.css">
+</head>
+
+<body>
+  <div class="topnav">
+    <h1>InfluxDB Manager</h1>
+  </div>
+  <div class="content">
+    <div class="card-grid">
+      <div class="card">
+        <form id="influxDbForm" onsubmit="sendInfluxDbForm(); return false;">
+          <br>
+          Kiln Name: <input type="text" name="kilnName" id="influxKilnName" placeholder="e.g. Skutt KM-1027 (tags all data from this device)">
+          <br>
+          <hr>
+          URL: <input type="text" name="url" id="influxUrl" placeholder="https://...influxdata.com">
+          <br>
+          Token: <input type="text" name="token" id="influxToken" placeholder="Re-enter API token (required)">
+          <br>
+          Org: <input type="text" name="org" id="influxOrg" placeholder="org name or email">
+          <br>
+          Bucket: <input type="text" name="bucket" id="influxBucket" placeholder="bucket name">
+          <br>
+          Timezone:
+          <select name="tzInfo" id="influxTzSelect" onchange="onTzSelectChange()">
+            <optgroup label="US &amp; Canada">
+              <option value="EST5EDT,M3.2.0,M11.1.0">Eastern (New York, Toronto) &mdash; observes DST</option>
+              <option value="CST6CDT,M3.2.0,M11.1.0">Central (Chicago, Winnipeg) &mdash; observes DST</option>
+              <option value="MST7MDT,M3.2.0,M11.1.0">Mountain (Denver, Boise) &mdash; observes DST</option>
+              <option value="MST7">Mountain &mdash; Arizona (no DST)</option>
+              <option value="PST8PDT,M3.2.0,M11.1.0">Pacific (Los Angeles, Vancouver) &mdash; observes DST</option>
+              <option value="AKST9AKDT,M3.2.0,M11.1.0">Alaska &mdash; observes DST</option>
+              <option value="HST10">Hawaii (no DST)</option>
+            </optgroup>
+            <optgroup label="Other">
+              <option value="UTC0">UTC</option>
+              <option value="GMT0BST,M3.5.0/1,M10.5.0">UK (London) &mdash; observes DST</option>
+              <option value="CET-1CEST,M3.5.0,M10.5.0/3">Central Europe (Berlin, Paris, Madrid) &mdash; observes DST</option>
+              <option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Eastern Europe (Athens, Helsinki) &mdash; observes DST</option>
+              <option value="IST-5:30">India (no DST)</option>
+              <option value="CST-8">China (no DST)</option>
+              <option value="JST-9">Japan (no DST)</option>
+              <option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Australia Eastern (Sydney) &mdash; observes DST</option>
+            </optgroup>
+            <option value="__custom__">Custom&hellip;</option>
+          </select>
+          <br>
+          <input type="text" id="influxTzCustom" placeholder="e.g. CST+6CDT,M4.1.0/2,M10.5.0/2" style="display:none">
+          <br>
+          <input type="submit" value="Save">
+        </form>
+        <br>
+        <button onclick="window.location.href='/'" class="button-on">Home</button>
+        <br><br>
+      </div>
+    </div>
+  </div>
+  <script src="script.js"></script>
+</body>
+
+</html>
