@@ -14,10 +14,8 @@
   #define OTA_VERSION "local_development"
 #endif
 
-// TODO: update once this project has a real GitHub repo — OTA checks will
-// just fail gracefully (404) against a nonexistent repo until then.
-static const char* GITHUB_OWNER   = "pllagunos";
-static const char* GITHUB_REPO    = "kiln-monitor";
+static const char* GITHUB_OWNER   = "DavidOlsen";
+static const char* GITHUB_REPO    = "Kiln-Monitor";
 static const char* FIRMWARE_ASSET = "e32r40t_gfx_firmware.bin";
 static const char* LittleFS_ASSET   = "e32r40t_gfx_spiffs.bin";
 

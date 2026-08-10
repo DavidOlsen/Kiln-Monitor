@@ -71,7 +71,7 @@ Published fields per active zone: `Zone<N> temperature`, `Zone<N> fault`, plus `
 
 ### OTA Firmware Updates
 
-Same GitHub-Releases-based mechanism as ElectricKiln (see `src/ota/ota.cpp`). **Before this works you need to point it at a real repository** — `GITHUB_OWNER`/`GITHUB_REPO` in `ota.cpp` currently reference a placeholder (`kiln-monitor`) that doesn't exist yet. Once you push this project to GitHub and cut a release, update those constants (and `.github/workflows/build-release.yml` builds against the `e32r40t_gfx` PlatformIO environment already, so no change needed there).
+Same GitHub-Releases-based mechanism as ElectricKiln (see `src/ota/ota.cpp`). Points at [DavidOlsen/Kiln-Monitor](https://github.com/DavidOlsen/Kiln-Monitor), which must be **public** — the device makes unauthenticated GitHub API calls. Cut a GitHub release to trigger `.github/workflows/build-release.yml`, which builds against the `e32r40t_gfx` PlatformIO environment and attaches the firmware/filesystem images plus their MD5 checksums to the release.
 
 ## License
 
