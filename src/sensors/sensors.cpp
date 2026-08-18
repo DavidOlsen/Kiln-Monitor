@@ -81,16 +81,58 @@ static void mcp9600HandleTcType(Adafruit_MCP9601 mcp[], bool present[]) {
     lastAppliedTcType = currentTcType;
 }
 
-// Pure decision logic: given a raw reading + status byte, decide whether the
-// zone is faulted. No hardware/mutex access here so it's callable from
-// on-device unit tests with fabricated inputs (e.g. simulating a probe that's
-// been unplugged, which reports via the same status bit as MCP9601_STATUS_OPENCIRCUIT).
-ZoneFaultResult evaluateZoneFault(float temperature, uint8_t status) {
+// Max plausible raw ADC magnitude for any real thermocouple reading across
+// the full operating range of either supported type: K tops out around
+// 1372C (~55mV EMF), S around 1768C (~19mV EMF) — K governs. At the MCP9600's
+// ~2uV/LSB ADC weighting that's roughly 27,000 counts at the extreme high
+// end. Field testing showed a genuinely disconnected/floating input reads
+// ~120,000+ counts, so this threshold has wide margin on both sides. Not yet
+// validated against a real high-temperature firing — worth confirming adcRaw
+// stays comfortably under this near a zone's actual max operating temp.
+static const int32_t ADC_RAW_FAULT_THRESHOLD = 50000;
+
+// Pure decision logic: given a raw reading + status byte + raw ADC counts,
+// decide whether the zone is faulted. No hardware/mutex access here so it's
+// callable from on-device unit tests with fabricated inputs.
+//
+// MCP9601_STATUS_OPENCIRCUIT and MCP9601_STATUS_SHORTCIRCUIT are MCP9601-
+// specific bits (the base MCP9600 only has the generic
+// MCP960X_STATUS_INPUTRANGE at the same 0x10 position as OPENCIRCUIT, with
+// no short-circuit detection at all).
+//
+// The open-circuit bit alone is noisy (flickers on marginal-but-connected
+// probes), and the linearized hotJunction reading is NOT a reliable signal
+// either: field testing showed it can land on a plausible-but-bogus non-zero
+// value on a disconnected input, and — worse — it can freeze at the last good
+// value if a probe is disconnected mid-run, giving no indication anything's
+// wrong. The raw ADC magnitude is the reliable signal: a real thermocouple's
+// EMF is small and bounded; a floating/disconnected input reads far outside
+// that range, in real time, regardless of what hotJunction is doing.
+ZoneFaultResult evaluateZoneFault(float temperature, uint8_t status, int32_t adcRaw) {
     bool badReading = isnan(temperature) || temperature < -50.0f || temperature > 1400.0f;
-    bool inputRangeFault = (status & MCP960X_STATUS_INPUTRANGE) != 0;
     if (badReading) return {true, "Reading out of range"};
-    if (inputRangeFault) return {true, "Input range fault"};
+
+    bool adcOutOfRange = adcRaw > ADC_RAW_FAULT_THRESHOLD || adcRaw < -ADC_RAW_FAULT_THRESHOLD;
+    bool openCircuit  = (status & MCP9601_STATUS_OPENCIRCUIT) != 0 && adcOutOfRange;
+    bool shortCircuit = (status & MCP9601_STATUS_SHORTCIRCUIT) != 0;
+    if (openCircuit)  return {true, "Probe disconnected (open circuit)"};
+    if (shortCircuit) return {true, "Probe shorted (short circuit)"};
+
     return {false, ""};
+}
+
+static const char* tcTypeCharFromEnum(MCP9600_ThemocoupleType t) {
+    switch (t) {
+        case MCP9600_TYPE_K: return "K";
+        case MCP9600_TYPE_J: return "J";
+        case MCP9600_TYPE_T: return "T";
+        case MCP9600_TYPE_N: return "N";
+        case MCP9600_TYPE_S: return "S";
+        case MCP9600_TYPE_E: return "E";
+        case MCP9600_TYPE_B: return "B";
+        case MCP9600_TYPE_R: return "R";
+        default:             return "?";
+    }
 }
 
 // A faulted zone just stops contributing readings — other active zones
@@ -100,7 +142,16 @@ static void mcp9600ReadZone(int i, Adafruit_MCP9601 &dev) {
     uint8_t status = dev.getStatus();
     float t = dev.readThermocouple();
 
-    ZoneFaultResult result = evaluateZoneFault(t, status);
+    // TEMP DEBUG: raw chip state, to diagnose K vs S readings. getThermocoupleType()
+    // re-reads the chip's actual live SENSORCONFIG register rather than trusting
+    // whatever we last told it to set, to catch any desync.
+    float ambientRaw = dev.readAmbient();
+    int32_t adcRaw = dev.readADC();
+    MCP9600_ThemocoupleType chipType = dev.getThermocoupleType();
+    log_i("Zone %d RAW: type=%s hotJunction=%.4fC ambient=%.4fC adcRaw=%ld status=0x%02X",
+          i + 1, tcTypeCharFromEnum(chipType), t, ambientRaw, (long)adcRaw, status);
+
+    ZoneFaultResult result = evaluateZoneFault(t, status, adcRaw);
 
     xSemaphoreTake(mutex, portMAX_DELAY);
     g_zones[i].fault = result.faulted;
