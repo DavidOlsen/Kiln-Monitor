@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <Adafruit_MCP9600.h>
+#include <Adafruit_MCP9601.h>
 
 #include "userSetup.h"
 #include "EKcommon.h"
@@ -24,7 +24,7 @@ static bool mcp9600TypeCharValid(char t) {
     return t == 'K' || t == 'S';
 }
 
-static void mcp9600ConfigureZone(Adafruit_MCP9600 &dev, char tcType) {
+static void mcp9600ConfigureZone(Adafruit_MCP9601 &dev, char tcType) {
     dev.setAmbientResolution(RES_ZERO_POINT_0625);
     dev.setADCresolution(MCP9600_ADCRESOLUTION_18);
     dev.setThermocoupleType(mcp9600TypeFromChar(tcType));
@@ -35,7 +35,7 @@ static void mcp9600ConfigureZone(Adafruit_MCP9600 &dev, char tcType) {
 // Probes any zone not currently marked present. Safe to call repeatedly —
 // a missing device just NACKs and begin() returns false, so this both
 // performs the initial boot-time scan and lets probes be hot-plugged later.
-static void mcp9600ScanZones(Adafruit_MCP9600 mcp[], bool present[], char tcType) {
+static void mcp9600ScanZones(Adafruit_MCP9601 mcp[], bool present[], char tcType) {
     for (int i = 0; i < MAX_ZONES; i++) {
         if (present[i]) continue;
         if (mcp[i].begin(TC_ZONE_I2C_ADDR[i], &Wire)) {
@@ -48,14 +48,14 @@ static void mcp9600ScanZones(Adafruit_MCP9600 mcp[], bool present[], char tcType
             g_zones[i].errMsg = "";
             xSemaphoreGive(mutex);
 
-            log_i("Zone %d: MCP9600 detected at 0x%02X", i + 1, TC_ZONE_I2C_ADDR[i]);
+            log_i("Zone %d: MCP9601 detected at 0x%02X", i + 1, TC_ZONE_I2C_ADDR[i]);
         }
     }
 }
 
 // Re-applies g_tcType to every present zone when it changes. All zones
 // share one thermocouple type setting (Config screen: K or S).
-static void mcp9600HandleTcType(Adafruit_MCP9600 mcp[], bool present[]) {
+static void mcp9600HandleTcType(Adafruit_MCP9601 mcp[], bool present[]) {
     xSemaphoreTake(mutex, portMAX_DELAY);
     char currentTcType = g_tcType;
     xSemaphoreGive(mutex);
@@ -81,38 +81,46 @@ static void mcp9600HandleTcType(Adafruit_MCP9600 mcp[], bool present[]) {
     lastAppliedTcType = currentTcType;
 }
 
+// Pure decision logic: given a raw reading + status byte, decide whether the
+// zone is faulted. No hardware/mutex access here so it's callable from
+// on-device unit tests with fabricated inputs (e.g. simulating a probe that's
+// been unplugged, which reports via the same status bit as MCP9601_STATUS_OPENCIRCUIT).
+ZoneFaultResult evaluateZoneFault(float temperature, uint8_t status) {
+    bool badReading = isnan(temperature) || temperature < -50.0f || temperature > 1400.0f;
+    bool inputRangeFault = (status & MCP960X_STATUS_INPUTRANGE) != 0;
+    if (badReading) return {true, "Reading out of range"};
+    if (inputRangeFault) return {true, "Input range fault"};
+    return {false, ""};
+}
+
 // A faulted zone just stops contributing readings — other active zones
 // keep logging independently, and the ambient/trigger logic in
 // telemetry.cpp already skips faulted zones.
-static void mcp9600ReadZone(int i, Adafruit_MCP9600 &dev) {
+static void mcp9600ReadZone(int i, Adafruit_MCP9601 &dev) {
     uint8_t status = dev.getStatus();
     float t = dev.readThermocouple();
 
-    bool badReading = isnan(t) || t < -50.0f || t > 1400.0f;
-    bool inputRangeFault = (status & MCP960X_STATUS_INPUTRANGE) != 0;
-    bool faulted = badReading || inputRangeFault;
+    ZoneFaultResult result = evaluateZoneFault(t, status);
 
     xSemaphoreTake(mutex, portMAX_DELAY);
-    g_zones[i].fault = faulted;
-    if (faulted) {
-        g_zones[i].errMsg = badReading ? "Reading out of range" : "Input range fault";
+    g_zones[i].fault = result.faulted;
+    if (result.faulted) {
+        g_zones[i].errMsg = result.errMsg;
     } else {
-        float processed = t;
-        processed += (float)tempOffset;
         g_zones[i].errMsg = "";
-        g_zones[i].pv = processed;
+        g_zones[i].pv = t + (float)tempOffset;
     }
     xSemaphoreGive(mutex);
 }
 
-static void mcp9600ReadAllZones(Adafruit_MCP9600 mcp[], bool present[]) {
+static void mcp9600ReadAllZones(Adafruit_MCP9601 mcp[], bool present[]) {
     for (int i = 0; i < MAX_ZONES; i++) {
         if (present[i]) mcp9600ReadZone(i, mcp[i]);
     }
 }
 
 void sensor_task(void *pvParameter) {
-  static Adafruit_MCP9600 mcp[MAX_ZONES];
+  static Adafruit_MCP9601 mcp[MAX_ZONES];
   static bool present[MAX_ZONES] = {false, false, false};
   unsigned long tempStart = 0;
   unsigned long lastRescan = 0;

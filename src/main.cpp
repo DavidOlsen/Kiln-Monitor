@@ -42,6 +42,8 @@ MyNetwork network(mutex, LittleFS);
 void main_task(void* parameter);
 
  #include <esp_task_wdt.h>
+
+#ifndef UNIT_TEST
 void setup() {
 
   // Option 1: Disable completely
@@ -100,3 +102,4 @@ void main_task(void* parameter) {
 void loop() {
   vTaskDelay(10);
 }
+#endif // UNIT_TEST
