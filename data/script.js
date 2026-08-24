@@ -234,6 +234,11 @@ function sendInfluxDbForm() {
     })
 }
 
+// Converts a raw Celsius reading for display, matching gui.cpp's displayTemperature().
+function displayTemperature(celsius, scale) {
+  return scale === 'F' ? (celsius * 9.0 / 5.0 + 32.0) : celsius;
+}
+
 // Poll live zone status (used by status.html)
 function refreshStatus() {
   fetch('/getStatus')
@@ -241,15 +246,17 @@ function refreshStatus() {
     .then(data => {
       const el = document.getElementById('statusData');
       if (!el) return;
+      const scale = data.tempScale || 'C';
+      const unit = '&deg;' + scale;
       const badgeClass = data.loggingActive ? 'badge-active' : 'badge-waiting';
       let html = '<p><span class="badge ' + badgeClass + '">' + (data.loggingActive ? 'LOGGING ACTIVE' : 'WAITING') + '</span></p>';
-      html += '<p>Ambient baseline: ' + data.ambientBaseline.toFixed(1) + '&deg; &mdash; TC type: ' + data.tcType + '</p>';
+      html += '<p>Ambient baseline: ' + displayTemperature(data.ambientBaseline, scale).toFixed(1) + unit + ' &mdash; TC type: ' + data.tcType + '</p>';
       html += '<ul class="zone-list">';
       data.zones.forEach((z, i) => {
         if (!z.active) return;
         const faultClass = z.fault ? ' class="fault"' : '';
         const status = z.fault ? '<span>FAULT</span>' : '';
-        html += '<li' + faultClass + '><span>Zone ' + (i + 1) + '</span><span>' + z.pv.toFixed(1) + '&deg;</span>' + status + '</li>';
+        html += '<li' + faultClass + '><span>Zone ' + (i + 1) + '</span><span>' + displayTemperature(z.pv, scale).toFixed(1) + unit + '</span>' + status + '</li>';
       });
       html += '</ul>';
       el.innerHTML = html;
