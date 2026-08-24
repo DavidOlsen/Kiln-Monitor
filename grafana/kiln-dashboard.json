@@ -1,0 +1,168 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_INFLUXDB",
+      "label": "InfluxDB",
+      "description": "Select your InfluxDB 2.x data source when importing",
+      "type": "datasource",
+      "pluginId": "influxdb",
+      "pluginName": "InfluxDB"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.0.0" },
+    { "type": "datasource", "id": "influxdb", "name": "InfluxDB", "version": "1.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "1.0.0" },
+    { "type": "panel", "id": "table", "name": "Table", "version": "1.0.0" }
+  ],
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "pointSize": 5,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 0 },
+      "id": 2,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["last", "max"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+          "query": "from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\")\n  |> filter(fn: (r) => r.KilnName == \"${kiln}\")\n  |> filter(fn: (r) => r.SessionId == \"${session}\")\n  |> filter(fn: (r) => r._field == \"Zone1 temperature\" or r._field == \"Zone2 temperature\" or r._field == \"Zone3 temperature\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Zone Temperatures — ${kiln} / Session ${session}",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "session_id" },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Session (click to view)"
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "View this session",
+                    "url": "/d/${__dashboard.uid}?${__all_variables}&var-session=${__value.raw}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "session_start" },
+            "properties": [
+              { "id": "unit", "value": "dateTimeAsLocal" },
+              { "id": "displayName", "value": "Started" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "session_end" },
+            "properties": [
+              { "id": "unit", "value": "dateTimeAsLocal" },
+              { "id": "displayName", "value": "Ended" }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 11 },
+      "id": 3,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Started", "desc": true }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+          "query": "startTimes = from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> group(columns: [\"SessionId\"])\n  |> first()\n  |> group()\n  |> keep(columns: [\"SessionId\", \"_time\"])\n  |> rename(columns: {SessionId: \"session_id\", _time: \"session_start\"})\n\nendTimes = from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> group(columns: [\"SessionId\"])\n  |> last()\n  |> group()\n  |> keep(columns: [\"SessionId\", \"_time\"])\n  |> rename(columns: {SessionId: \"session_id\", _time: \"session_end\"})\n\njoin(tables: {start: startTimes, end: endTimes}, on: [\"session_id\"])\n  |> sort(columns: [\"session_start\"], desc: true)",
+          "refId": "A"
+        }
+      ],
+      "title": "Previous Sessions — ${kiln}",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["kiln", "influxdb"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"Kiln\", tag: \"KilnName\", predicate: (r) => r._measurement == \"KILN MONITOR\")",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Kiln",
+        "multi": false,
+        "name": "kiln",
+        "options": [],
+        "query": {
+          "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"Kiln\", tag: \"KilnName\", predicate: (r) => r._measurement == \"KILN MONITOR\")"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {},
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "definition": "from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> group(columns: [\"SessionId\"])\n  |> max(column: \"_time\")\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> keep(columns: [\"SessionId\"])\n  |> rename(columns: {SessionId: \"_value\"})",
+        "hide": 0,
+        "includeAll": false,
+        "label": "Session",
+        "multi": false,
+        "name": "session",
+        "options": [],
+        "query": {
+          "query": "from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> group(columns: [\"SessionId\"])\n  |> max(column: \"_time\")\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> keep(columns: [\"SessionId\"])\n  |> rename(columns: {SessionId: \"_value\"})"
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-5y", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Kiln Temperature Monitor",
+  "uid": "kiln-temp-monitor",
+  "version": 1,
+  "weekStart": ""
+}
