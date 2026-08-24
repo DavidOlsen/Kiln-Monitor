@@ -47,7 +47,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
-          "query": "from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\")\n  |> filter(fn: (r) => r.KilnName == \"${kiln}\")\n  |> filter(fn: (r) => r.SessionId == \"${session}\")\n  |> filter(fn: (r) => r._field == \"Zone1 temperature\" or r._field == \"Zone2 temperature\" or r._field == \"Zone3 temperature\")",
+          "query": "from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\")\n  |> filter(fn: (r) => r.KilnName == \"${kiln}\")\n  |> filter(fn: (r) => r.SessionId == \"${session}\")\n  |> filter(fn: (r) => r._field == \"Zone1 temperature\" or r._field == \"Zone2 temperature\" or r._field == \"Zone3 temperature\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
           "refId": "A"
         }
       ],
@@ -73,7 +73,7 @@
                 "value": [
                   {
                     "title": "View this session",
-                    "url": "/d/${__dashboard.uid}?${__all_variables}&var-session=${__value.raw}",
+                    "url": "/d/${__dashboard.uid}?${__all_variables}&var-session=${__value.raw}&from=${__data.fields.start_ms}&to=${__data.fields.end_ms}",
                     "targetBlank": false
                   }
                 ]
@@ -93,6 +93,18 @@
               { "id": "unit", "value": "dateTimeAsLocal" },
               { "id": "displayName", "value": "Ended" }
             ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "start_ms" },
+            "properties": [
+              { "id": "custom.hideFrom", "value": { "viz": true, "legend": true, "tooltip": true } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "end_ms" },
+            "properties": [
+              { "id": "custom.hideFrom", "value": { "viz": true, "legend": true, "tooltip": true } }
+            ]
           }
         ]
       },
@@ -105,7 +117,7 @@
       "targets": [
         {
           "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
-          "query": "startTimes = from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> group(columns: [\"SessionId\"])\n  |> first()\n  |> group()\n  |> keep(columns: [\"SessionId\", \"_time\"])\n  |> rename(columns: {SessionId: \"session_id\", _time: \"session_start\"})\n\nendTimes = from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> group(columns: [\"SessionId\"])\n  |> last()\n  |> group()\n  |> keep(columns: [\"SessionId\", \"_time\"])\n  |> rename(columns: {SessionId: \"session_id\", _time: \"session_end\"})\n\njoin(tables: {start: startTimes, end: endTimes}, on: [\"session_id\"])\n  |> sort(columns: [\"session_start\"], desc: true)",
+          "query": "startTimes = from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> filter(fn: (r) => r._field == \"Zone1 temperature\")\n  |> group(columns: [\"SessionId\"])\n  |> first()\n  |> group()\n  |> keep(columns: [\"SessionId\", \"_time\"])\n  |> rename(columns: {SessionId: \"session_id\", _time: \"session_start\"})\n\nendTimes = from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> filter(fn: (r) => r._field == \"Zone1 temperature\")\n  |> group(columns: [\"SessionId\"])\n  |> last()\n  |> group()\n  |> keep(columns: [\"SessionId\", \"_time\"])\n  |> rename(columns: {SessionId: \"session_id\", _time: \"session_end\"})\n\njoin(tables: {start: startTimes, end: endTimes}, on: [\"session_id\"])\n  |> map(fn: (r) => {\n      startMs = uint(v: r.session_start) / uint(v: 1000000)\n      endMs = uint(v: r.session_end) / uint(v: 1000000)\n      pad = (endMs - startMs) / uint(v: 20)\n      return {r with start_ms: startMs - pad, end_ms: endMs + pad}\n  })\n  |> sort(columns: [\"session_start\"], desc: true)",
           "refId": "A"
         }
       ],
@@ -140,7 +152,7 @@
       {
         "current": {},
         "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
-        "definition": "from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> group(columns: [\"SessionId\"])\n  |> max(column: \"_time\")\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> keep(columns: [\"SessionId\"])\n  |> rename(columns: {SessionId: \"_value\"})",
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"Kiln\", tag: \"SessionId\", predicate: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\", start: -5y)",
         "hide": 0,
         "includeAll": false,
         "label": "Session",
@@ -148,17 +160,17 @@
         "name": "session",
         "options": [],
         "query": {
-          "query": "from(bucket: \"Kiln\")\n  |> range(start: -5y)\n  |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\")\n  |> group(columns: [\"SessionId\"])\n  |> max(column: \"_time\")\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> keep(columns: [\"SessionId\"])\n  |> rename(columns: {SessionId: \"_value\"})"
+          "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"Kiln\", tag: \"SessionId\", predicate: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"${kiln}\", start: -5y)"
         },
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
-        "sort": 0,
+        "sort": 4,
         "type": "query"
       }
     ]
   },
-  "time": { "from": "now-5y", "to": "now" },
+  "time": { "from": "now-3d", "to": "now" },
   "timepicker": {},
   "timezone": "",
   "title": "Kiln Temperature Monitor",
