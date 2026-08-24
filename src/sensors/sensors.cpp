@@ -89,7 +89,17 @@ static void mcp9600HandleTcType(Adafruit_MCP9601 mcp[], bool present[]) {
 // ~120,000+ counts, so this threshold has wide margin on both sides. Not yet
 // validated against a real high-temperature firing — worth confirming adcRaw
 // stays comfortably under this near a zone's actual max operating temp.
-static const int32_t ADC_RAW_FAULT_THRESHOLD = 50000;
+static const int32_t ADC_RAW_OPEN_CIRCUIT_THRESHOLD = 50000;
+
+// A dead short ties both thermocouple leads to the same potential, so a
+// genuine short should read close to zero EMF, not a real thermal signal.
+// This is the inverse shape of the open-circuit check, but UNLIKE that one
+// it isn't yet backed by field comparisons — the only real data point so far
+// is a normal at-rest connected probe (Zone 3) sitting at ~15-34 counts, so
+// this threshold is set tighter than that as a starting guess. Needs the same
+// kind of field validation open-circuit got: capture RAW debug lines for a
+// deliberately shorted probe vs. a normal one and confirm/tune this value.
+static const int32_t ADC_RAW_SHORT_CIRCUIT_THRESHOLD = 10;
 
 // Pure decision logic: given a raw reading + status byte + raw ADC counts,
 // decide whether the zone is faulted. No hardware/mutex access here so it's
@@ -100,21 +110,23 @@ static const int32_t ADC_RAW_FAULT_THRESHOLD = 50000;
 // MCP960X_STATUS_INPUTRANGE at the same 0x10 position as OPENCIRCUIT, with
 // no short-circuit detection at all).
 //
-// The open-circuit bit alone is noisy (flickers on marginal-but-connected
-// probes), and the linearized hotJunction reading is NOT a reliable signal
-// either: field testing showed it can land on a plausible-but-bogus non-zero
-// value on a disconnected input, and — worse — it can freeze at the last good
-// value if a probe is disconnected mid-run, giving no indication anything's
-// wrong. The raw ADC magnitude is the reliable signal: a real thermocouple's
-// EMF is small and bounded; a floating/disconnected input reads far outside
-// that range, in real time, regardless of what hotJunction is doing.
+// Both status bits are noisy alone (flicker on marginal-but-connected
+// probes), and the linearized hotJunction reading is NOT a reliable
+// corroborating signal for either: field testing showed it can land on a
+// plausible-but-bogus non-zero value on a disconnected input, and — worse —
+// it can freeze at the last good value if a probe is disconnected mid-run,
+// giving no indication anything's wrong. The raw ADC magnitude is the
+// reliable signal instead: open circuit rails it far outside any real
+// thermocouple's EMF range, short circuit pins it near zero — both in real
+// time, regardless of what hotJunction is doing.
 ZoneFaultResult evaluateZoneFault(float temperature, uint8_t status, int32_t adcRaw) {
     bool badReading = isnan(temperature) || temperature < -50.0f || temperature > 1400.0f;
     if (badReading) return {true, "Reading out of range"};
 
-    bool adcOutOfRange = adcRaw > ADC_RAW_FAULT_THRESHOLD || adcRaw < -ADC_RAW_FAULT_THRESHOLD;
+    bool adcOutOfRange = adcRaw > ADC_RAW_OPEN_CIRCUIT_THRESHOLD || adcRaw < -ADC_RAW_OPEN_CIRCUIT_THRESHOLD;
+    bool adcNearZero   = adcRaw <= ADC_RAW_SHORT_CIRCUIT_THRESHOLD && adcRaw >= -ADC_RAW_SHORT_CIRCUIT_THRESHOLD;
     bool openCircuit  = (status & MCP9601_STATUS_OPENCIRCUIT) != 0 && adcOutOfRange;
-    bool shortCircuit = (status & MCP9601_STATUS_SHORTCIRCUIT) != 0;
+    bool shortCircuit = (status & MCP9601_STATUS_SHORTCIRCUIT) != 0 && adcNearZero;
     if (openCircuit)  return {true, "Probe disconnected (open circuit)"};
     if (shortCircuit) return {true, "Probe shorted (short circuit)"};
 
