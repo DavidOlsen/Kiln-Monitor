@@ -51,7 +51,23 @@ public:
   bool hasNewInfluxCredentials() const;
   void clearInfluxCredentialsFlag();
 
+  // Releases the query-in-progress guard taken by handleGetSessions()/
+  // handleDownloadSession(). Public because the CSV download's streaming
+  // state (network.cpp, anonymous namespace) releases it from its own
+  // destructor, well after the handler function that started it has returned.
+  void releaseQueryLock();
+
 private:
+  void handleGetSessions(AsyncWebServerRequest* request);
+  void handleDownloadSession(AsyncWebServerRequest* request);
+
+  // Tries to take the query-in-progress guard. Returns false if genuinely
+  // busy. Also self-heals: if the existing hold is older than a query could
+  // plausibly still be legitimately running, it's treated as leaked (e.g.
+  // from a response object that never got torn down) and forced clear rather
+  // than wedging the whole feature until reboot.
+  bool tryAcquireQueryLock();
+
   SemaphoreHandle_t& sharedMutex;
   fs::FS& fileSystem;
 
@@ -72,6 +88,12 @@ private:
   bool receivedInfluxCredentials = false;
   bool pendingCaptiveExit = false;
   unsigned long lastSSIDUpdate;
+
+  // Guards against overlapping InfluxDB query requests (session list/download) —
+  // each one spins up its own TLS client, and two concurrent TLS sessions on
+  // top of the write-path client is more heap than this device can spare.
+  bool queryInProgress_ = false;
+  unsigned long queryLockAcquiredAt_ = 0;
 
   // Number of consecutive failed connection attempts before auto-falling back to AP mode
   static constexpr uint8_t AUTO_AP_FAILURE_THRESHOLD = 3;

@@ -172,7 +172,7 @@ void telemetry_task(void* parameter) {
               sensor.toLineProtocol().c_str());
       } else {
         // Logged on every successful write, not just failure/recovery
-        // transitions — verbose (one line/sec during a run) but requested
+        // transitions — verbose (one line/10s during a run) but requested
         // for confirming write cadence during debugging.
         log_i("InfluxDB write OK: %s", sensor.toLineProtocol().c_str());
       }
@@ -180,6 +180,6 @@ void telemetry_task(void* parameter) {
       published = false;
     }
 
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
   }
 }

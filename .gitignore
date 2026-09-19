@@ -3,3 +3,4 @@
 
 # Ignore personal credentials
 src/secrets.h
+.DS_Store

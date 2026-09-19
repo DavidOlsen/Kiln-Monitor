@@ -1,6 +1,10 @@
 #include "network.h"
 #include <ESPmDNS.h>
 #include <InfluxDbClient.h> // for timeSync() — NTP sync independent of InfluxDB configuration
+#include <InfluxDbCloud.h>  // InfluxDbCloud2CACert, used by the session-list query client below
+#include <HTTPClient.h>     // used directly (not via the InfluxDB client lib) for the CSV download — see SessionCsvStream
+#include <memory>
+#include <vector>
 
 #ifndef OTA_VERSION
   #define OTA_VERSION "local_development"
@@ -44,6 +48,406 @@ void sendFileOrFallback(AsyncWebServerRequest* request, fs::FS& fs, const char* 
   log_w("File %s not found on LittleFS; serving fallback content", path);
   request->send(200, contentType, fallbackHtml);
 }
+
+// Escapes a value for interpolation inside a Flux double-quoted string
+// literal. Used instead of the InfluxDB client library's `params` query
+// binding, which this device's InfluxDB instance rejects server-side with
+// "undefined identifier params" — apparently unsupported on this deployment.
+// Safe here because the only values ever passed through this are KilnName
+// and bucket (from this device's own stored config, never the HTTP request)
+// and a digit-only session id validated before it ever reaches this function.
+String fluxEscape(const String& value) {
+  String out;
+  out.reserve(value.length());
+  for (size_t i = 0; i < value.length(); i++) {
+    char c = value[i];
+    if (c == '\\' || c == '"') out += '\\';
+    out += c;
+  }
+  return out;
+}
+
+// Builds a Flux query for exactly one field's series within one session.
+// Deliberately as simple as possible: a single already-time-ordered series,
+// no pivot(), no group(), no cross-field merge/sort — see SessionCsvStream's
+// comment for why every one of those turned out to cost something on this
+// project's InfluxDB instance.
+// Minimal JSON-string escaper for embedding the Flux query into the POST
+// body InfluxDB's /api/v2/query expects. Distinct from fluxEscape() above —
+// that one escapes for a Flux string *literal*; this one escapes for the
+// *outer* JSON envelope the whole query string sits inside.
+String jsonEscape(const String& value) {
+  String out;
+  out.reserve(value.length());
+  for (size_t i = 0; i < value.length(); i++) {
+    char c = value[i];
+    switch (c) {
+      case '"':  out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n";  break;
+      case '\r': out += "\\r";  break;
+      case '\t': out += "\\t";  break;
+      default:   out += c;
+    }
+  }
+  return out;
+}
+
+// Minimal percent-encoding for the org name in the query URL's query string.
+// KilnName/bucket go through fluxEscape() instead since those are embedded
+// in the Flux query body, not the URL.
+String urlEncode(const String& value) {
+  String out;
+  const char* hex = "0123456789ABCDEF";
+  for (size_t i = 0; i < value.length(); i++) {
+    char c = value[i];
+    if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      out += c;
+    } else {
+      out += '%';
+      out += hex[(c >> 4) & 0xF];
+      out += hex[c & 0xF];
+    }
+  }
+  return out;
+}
+
+// Reads an HTTP response body directly off a WiFiClient, decoding chunked
+// transfer-encoding itself, byte-counted throughout — never relying on
+// Stream::readStringUntil()'s ambiguous "" return (which means both "hit a
+// blank line" and "genuinely timed out", indistinguishably). That exact
+// ambiguity, inside the InfluxDB client library's own HttpStreamScanner, is
+// what every earlier version of this download's Flux query tripped over one
+// way or another (see git history / the InfluxDB deployment notes for the
+// three variants that were tried) — a blank line is completely routine in
+// Flux's CSV format (it's the separator between result tables), so a reader
+// that can't tell it apart from a stalled socket will eventually misfire on
+// any large or multi-table response. Framing (chunk-size lines, the CRLF
+// between chunks) is read with WiFiClient::readBytes(), which reports
+// exactly how many bytes it actually got — fewer than requested is an
+// unambiguous, genuine failure, unlike an empty string from readStringUntil.
+class ChunkedBodyReader {
+public:
+  ChunkedBodyReader(WiFiClient* stream, bool chunked, long contentLength)
+      : _stream(stream), _chunked(chunked), _remaining(contentLength) {}
+
+  // Returns the next logical line of the (de-chunked) body, or an empty
+  // string once nothing more will ever come — check error()/finished() to
+  // tell a genuine read failure apart from a clean end of body.
+  String readLine() {
+    while (true) {
+      int nl = _buffer.indexOf('\n');
+      if (nl >= 0) {
+        String line = _buffer.substring(0, nl);
+        _buffer.remove(0, nl + 1);
+        if (line.endsWith("\r")) line.remove(line.length() - 1);
+        return line;
+      }
+      if (_finished || _error) return String();
+      if (!fillMore()) return String(); // fillMore() sets _finished or _error
+    }
+  }
+
+  bool finished() const { return _finished; }
+  bool error() const { return _error; }
+
+private:
+  WiFiClient* _stream;
+  bool _chunked;
+  long _remaining;             // bytes left: in the current chunk (chunked) or whole body (not)
+  bool _needChunkSizeLine = true;
+  String _buffer;
+  bool _finished = false;
+  bool _error = false;
+
+  // Reads one CRLF- or LF-terminated line straight off the socket, byte by
+  // byte. Only used for chunk framing (chunk-size lines, the empty line
+  // between chunks) — always short, so byte-at-a-time cost is negligible.
+  bool readRawLine(String& out) {
+    out = "";
+    uint8_t c;
+    while (true) {
+      if (_stream->readBytes(&c, 1) != 1) return false;
+      if (c == '\n') return true;
+      if (c != '\r') out += (char)c;
+    }
+  }
+
+  bool fillMore() {
+    static const size_t READ_BUF = 256;
+    uint8_t tmp[READ_BUF];
+
+    if (_chunked) {
+      if (_needChunkSizeLine) {
+        String sizeLine;
+        if (!readRawLine(sizeLine)) { _error = true; return false; }
+        int semi = sizeLine.indexOf(';'); // chunk extensions, if any — ignored
+        if (semi >= 0) sizeLine = sizeLine.substring(0, semi);
+        sizeLine.trim();
+        long size = strtol(sizeLine.c_str(), nullptr, 16);
+        if (size <= 0) { _finished = true; return false; } // the terminating 0-length chunk
+        _remaining = size;
+        _needChunkSizeLine = false;
+      }
+      size_t want = (_remaining < (long)READ_BUF) ? (size_t)_remaining : READ_BUF;
+      size_t got = _stream->readBytes(tmp, want);
+      if (got == 0) { _error = true; return false; }
+      for (size_t i = 0; i < got; i++) _buffer += (char)tmp[i];
+      _remaining -= got;
+      if (_remaining == 0) {
+        String trailer;
+        if (!readRawLine(trailer)) { _error = true; return false; } // chunk's trailing CRLF
+        _needChunkSizeLine = true;
+      }
+      return true;
+    }
+
+    // Not chunked — a plain Content-Length-bounded body.
+    if (_remaining <= 0) { _finished = true; return false; }
+    size_t want = (_remaining < (long)READ_BUF) ? (size_t)_remaining : READ_BUF;
+    size_t got = _stream->readBytes(tmp, want);
+    if (got == 0) { _error = true; return false; }
+    for (size_t i = 0; i < got; i++) _buffer += (char)tmp[i];
+    _remaining -= got;
+    return true;
+  }
+};
+
+// Drives one CSV download as a genuinely incremental HTTP chunked response
+// back to the browser. Talks to InfluxDB directly via ESP32's own HTTPClient
+// rather than the InfluxDB client library's query()/FluxQueryResult — see
+// ChunkedBodyReader's comment for why. Emits "long" format (time,field,value
+// — one row per raw point, grouped by field rather than interleaved by
+// time), parsing Flux's annotated CSV format itself: lines starting with '#'
+// are annotations (skipped), the next line is that table's column header
+// (parsed to find the _time/_field/_value column positions), a blank line
+// marks the boundary to the next table, and everything else is a data row.
+//
+// The first cut of this (AsyncResponseStream) built the entire CSV as one
+// in-memory String before sending a byte — fine for the small JSON session
+// list, but a multi-hour firing at 1 sample/sec is 100k+ rows, and that
+// String's growth just silently stopped once the ESP32's ~300KB heap ran
+// out, shipping a truncated-but-valid-looking file with no error anywhere.
+// This still pulls exactly one row at a time and copies it into whatever
+// buffer size ESPAsyncWebServer's chunked response hands us on each call,
+// carrying any leftover across calls in `pending`, same as that fix.
+//
+// Owned via std::shared_ptr from the AwsResponseFiller lambda in
+// handleDownloadSession() — that lambda outlives the handler function call
+// (ESPAsyncWebServer invokes it repeatedly as the client is ready for more),
+// so the HTTPClient/WiFiClient/queryInProgress_ lock all have to be released
+// from this struct's destructor, once the response object itself is torn
+// down, not from the end of the handler function.
+struct SessionCsvStream {
+  HTTPClient http;
+  WiFiClient wifiClient;
+  MyNetwork* network;
+  ChunkedBodyReader* reader = nullptr;
+  int timeCol = -1;
+  std::vector<int> valueCols;    // indices (in the current table's header) of every column to emit, in header order
+  std::vector<String> valueNames; // their names — becomes the CSV header once the first table's header line is seen
+  bool inTable = false;   // whether the current table's header row has been seen
+  bool headerWritten = false;
+  bool done = false;
+  bool hadError = false;
+  String pending;
+  size_t pendingOffset = 0;
+  int rowCount = 0;
+
+  SessionCsvStream(MyNetwork* n) : network(n) {}
+
+  ~SessionCsvStream() {
+    if (hadError) {
+      log_e("handleDownloadSession: completed with errors, sent %d row(s) | free heap: %d, max alloc: %d",
+            rowCount, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    } else {
+      log_i("handleDownloadSession: sent %d row(s)", rowCount);
+    }
+    delete reader;
+    http.end();
+    network->releaseQueryLock();
+  }
+
+  // Issues the query and prepares the reader. Returns false on outright
+  // request failure (bad response code) — the caller still needs to send
+  // *some* HTTP response in that case, since no chunked response has been
+  // started yet.
+  //
+  // pivot() reshapes the raw per-field points into one wide row per
+  // timestamp, with a column per field (Zone1 temperature, Zone1 fault, ...)
+  // — this is safe to use now in a way it wasn't earlier in this feature's
+  // history: the failures previously blamed on pivot() being too expensive
+  // for InfluxDB to compute were chased before two client-side bugs got
+  // fixed (the InfluxDB library's setHTTPOptions() silently not applying our
+  // configured timeout, and its HttpStreamScanner misreading a legitimate
+  // blank line as a fatal timeout — see the InfluxDB deployment notes for
+  // the full history). Both are gone now that this reads the response
+  // itself via ChunkedBodyReader, so it's worth trusting pivot() again
+  // rather than assuming it's still the problem.
+  bool start(const InfluxDbConfig& cfg, const String& kilnName, const String& sessionId) {
+    String url = cfg.url + "/api/v2/query?org=" + urlEncode(cfg.org);
+    String flux =
+      "from(bucket: \"" + fluxEscape(cfg.bucket) + "\")"
+      " |> range(start: -5y)"
+      " |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"" + fluxEscape(kilnName) +
+      "\" and r.SessionId == \"" + sessionId + "\")"
+      " |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")"
+      " |> sort(columns: [\"_time\"])";
+    String body =
+      "{\"type\":\"flux\",\"query\":\"" + jsonEscape(flux) + "\","
+      "\"dialect\":{\"annotations\":[\"datatype\"],\"dateTimeFormat\":\"RFC3339\","
+      "\"header\":true,\"delimiter\":\",\",\"commentPrefix\":\"#\"}}";
+
+    const char* headerKeys[] = {"Transfer-Encoding"};
+    http.collectHeaders(headerKeys, 1);
+    http.setTimeout(30000);
+    http.setConnectTimeout(10000);
+    if (!http.begin(wifiClient, url)) {
+      log_e("handleDownloadSession: HTTPClient::begin failed for %s", url.c_str());
+      hadError = true;
+      return false;
+    }
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", "Token " + cfg.token);
+
+    int code = http.POST(body);
+    if (code != 200) {
+      log_e("handleDownloadSession: query POST failed, status %d: %s", code, http.getString().c_str());
+      hadError = true;
+      return false;
+    }
+
+    bool chunked = http.header("Transfer-Encoding").equalsIgnoreCase("chunked");
+    reader = new ChunkedBodyReader(http.getStreamPtr(), chunked, http.getSize());
+    return true;
+  }
+
+  static std::vector<String> splitCsvLine(const String& line) {
+    std::vector<String> cols;
+    int start = 0;
+    while (start <= (int)line.length()) {
+      int comma = line.indexOf(',', start);
+      cols.push_back((comma < 0) ? line.substring(start) : line.substring(start, comma));
+      if (comma < 0) break;
+      start = comma + 1;
+    }
+    return cols;
+  }
+
+  // Finds _time plus every other real column (temperature/fault/Ambient —
+  // whichever pivot() produced for this session) in a table's header line,
+  // skipping Flux's own bookkeeping columns and the tags, which aren't
+  // useful in the CSV (constant for the whole file, or redundant with it).
+  void parseHeaderLine(const String& line) {
+    static const std::set<String> skip = {
+      "result", "table", "_start", "_stop", "_measurement", "KilnName", "SessionId"
+    };
+    timeCol = -1;
+    valueCols.clear();
+    valueNames.clear();
+    std::vector<String> cols = splitCsvLine(line);
+    for (size_t i = 0; i < cols.size(); i++) {
+      if (cols[i] == "_time") {
+        timeCol = (int)i;
+      } else if (!cols[i].isEmpty() && skip.find(cols[i]) == skip.end()) {
+        valueCols.push_back((int)i);
+        valueNames.push_back(cols[i]);
+      }
+    }
+  }
+
+  // Builds one wide CSV row (time + every value column) from a data line, by
+  // position, using the most recently parsed header line. Returns false if
+  // the row is shorter than expected (skipped as malformed rather than
+  // treated as fatal).
+  bool parseDataLine(const String& line, String& rowOut) {
+    if (timeCol < 0) return false;
+    std::vector<String> cols = splitCsvLine(line);
+    if (timeCol >= (int)cols.size()) return false;
+    rowOut = cols[timeCol];
+    for (size_t i = 0; i < valueCols.size(); i++) {
+      rowOut += ",";
+      if (valueCols[i] < (int)cols.size()) rowOut += cols[valueCols[i]];
+    }
+    return true;
+  }
+
+  // Advances through the response until the next real data row, updating
+  // column positions whenever a new table's header line is encountered.
+  // Returns false only once the body is genuinely exhausted (clean end or a
+  // real read error — either way, the destructor logs which).
+  bool nextRow(String& rowOut) {
+    while (true) {
+      String line = reader->readLine();
+      if (line.isEmpty()) {
+        // readLine() returns "" for two different reasons that must not be
+        // conflated: a genuinely empty *logical* line (Flux's separator
+        // between result tables) versus true end-of-body. Only the reader's
+        // own finished()/error() flags can tell them apart — treating every
+        // "" as end-of-data here silently stopped the whole download after
+        // the first table.
+        if (reader->finished() || reader->error()) {
+          if (reader->error()) hadError = true;
+          return false; // genuinely nothing left
+        }
+        inTable = false; // a real blank line — boundary to the next table
+        continue;
+      }
+      if (line.startsWith("#")) { inTable = false; continue; } // annotation line — a table is starting
+      if (!inTable) { parseHeaderLine(line); inTable = true; continue; } // this table's header row
+      if (parseDataLine(line, rowOut)) {
+        rowCount++;
+        return true;
+      }
+      // Malformed row — skip.
+    }
+  }
+
+  void advance() {
+    if (!headerWritten) {
+      headerWritten = true;
+      // The CSV header depends on which fields pivot() actually produced —
+      // only known once the first table's header line has been parsed,
+      // which happens as a side effect of pulling the first data row. So
+      // pull that row now and emit both lines together.
+      String firstRow;
+      if (nextRow(firstRow)) {
+        String header = "time";
+        for (size_t i = 0; i < valueNames.size(); i++) { header += ","; header += valueNames[i]; }
+        header += "\n";
+        pending = header + firstRow + "\n";
+      } else {
+        pending = "time\n"; // no rows matched — still a minimal valid CSV
+      }
+      return;
+    }
+    String row;
+    if (nextRow(row)) {
+      pending = row + "\n";
+    } else {
+      pending = "";
+      done = true;
+    }
+  }
+
+  size_t fill(uint8_t* buf, size_t maxLen) {
+    size_t written = 0;
+    while (written < maxLen) {
+      if (pendingOffset < (size_t)pending.length()) {
+        size_t avail = pending.length() - pendingOffset;
+        size_t toCopy = (maxLen - written < avail) ? (maxLen - written) : avail;
+        memcpy(buf + written, pending.c_str() + pendingOffset, toCopy);
+        written += toCopy;
+        pendingOffset += toCopy;
+        continue;
+      }
+      if (done) break;
+      pendingOffset = 0;
+      advance();
+    }
+    return written;
+  }
+};
 }  // namespace
 
 MyNetwork::MyNetwork(SemaphoreHandle_t& mutex, fs::FS& fileSystem)
@@ -256,6 +660,25 @@ void MyNetwork::setupServer() {
     request->send(200, "application/json", output);
   });
 
+  // Route for the firing sessions page
+  server.on("/sessions", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    sendFileOrFallback(request, fileSystem, "/sessions.html", "text/html", FALLBACK_INDEX_HTML);
+  });
+
+  // Lists this device's firing sessions (start/end time, point count) pulled from
+  // InfluxDB. Always scoped server-side to this device's own KilnName tag — the
+  // request cannot influence which kiln's data is queried.
+  server.on("/getSessions", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    handleGetSessions(request);
+  });
+
+  // Streams one firing session's data back as a CSV download, again scoped to
+  // this device's own KilnName tag; the only client-supplied value is the
+  // session id, validated as digits-only before it's used.
+  server.on("/downloadSession", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    handleDownloadSession(request);
+  });
+
   // Route for the firmware update page
   server.on("/firmware-update", HTTP_GET, [this](AsyncWebServerRequest* request) {
     sendFileOrFallback(request, fileSystem, "/firmware-update.html", "text/html", FALLBACK_INDEX_HTML);
@@ -398,7 +821,11 @@ void MyNetwork::setupServer() {
     sendFileOrFallback(request, fileSystem, "/index.html", "text/html", FALLBACK_INDEX_HTML);
   });
 
-  server.serveStatic("/", fileSystem, "/");
+  // This project never ships pre-gzipped assets, so the library's default
+  // gzip-first probe just costs a failed LittleFS open() on every static
+  // request — which vfs_api.cpp itself logs at [E], drowning out real
+  // errors in the serial monitor for no benefit.
+  server.serveStatic("/", fileSystem, "/").setTryGzipFirst(false);
 
   if (!captiveHandlerAdded) {
     server.addHandler(new CaptiveRequestHandler()).setFilter(ON_AP_FILTER);
@@ -591,12 +1018,190 @@ void MyNetwork::saveKilnName(const String& name) {
   xSemaphoreGive(sharedMutex);
 }
 
+// Lists this device's firing sessions: one row per SessionId tag value seen
+// under this device's own KilnName, with first/last timestamp and point count.
+// Grouped/aggregated in Flux rather than pulled point-by-point, since a run can
+// be tens of thousands of points and this device doesn't have room to buffer that.
+void MyNetwork::handleGetSessions(AsyncWebServerRequest* request) {
+  log_i("handleGetSessions: request received");
+
+  InfluxDbConfig cfg;
+  String kilnName;
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  cfg = g_influxConfig;
+  kilnName = g_kilnName;
+  xSemaphoreGive(sharedMutex);
+
+  if (!cfg.configured) {
+    request->send(400, "application/json", "{\"error\":\"InfluxDB not configured\"}");
+    return;
+  }
+
+  if (!tryAcquireQueryLock()) {
+    request->send(503, "application/json", "{\"error\":\"Another query is already in progress\"}");
+    return;
+  }
+
+  InfluxDBClient client(cfg.url.c_str(), cfg.org.c_str(), cfg.bucket.c_str(), cfg.token.c_str(), InfluxDbCloud2CACert);
+  // validateConnection() forces the client's internal _service/HTTPClient to
+  // exist (a cheap /health GET) before we touch options — the library's
+  // setHTTPOptions() silently no-ops until that object exists, so calling it
+  // any earlier than this would have configured nothing. Default read
+  // timeout (5s) is tuned for small write/status calls — an aggregate over
+  // every point this kiln has ever logged is a bigger ask.
+  client.validateConnection();
+  client.setHTTPOptions(HTTPOptions().httpReadTimeout(30000));
+
+  // KilnName and bucket come from this device's own stored config, never from
+  // the request, so a client can't point the query at another kiln's data.
+  // fluxEscape() makes it safe to inline them even though a kiln name is
+  // free-text the user could type a quote character into.
+  String flux =
+    "from(bucket: \"" + fluxEscape(cfg.bucket) + "\")"
+    " |> range(start: -5y)"
+    " |> filter(fn: (r) => r._measurement == \"KILN MONITOR\" and r.KilnName == \"" + fluxEscape(kilnName) + "\" and r._field == \"Ambient\")"
+    " |> group(columns: [\"SessionId\"])"
+    " |> sort(columns: [\"_time\"])"
+    " |> reduce("
+    "     fn: (r, accumulator) => ({"
+    "       count: accumulator.count + 1,"
+    "       first: if accumulator.count == 0 then r._time else accumulator.first,"
+    "       last: r._time"
+    "     }),"
+    "     identity: {count: 0, first: time(v: 0), last: time(v: 0)}"
+    "   )";
+
+  log_i("handleGetSessions: querying %s (org=%s bucket=%s)", cfg.url.c_str(), cfg.org.c_str(), cfg.bucket.c_str());
+  FluxQueryResult result = client.query(flux);
+  log_i("handleGetSessions: query() returned, reading rows. Free heap: %d", ESP.getFreeHeap());
+
+  JsonDocument json;
+  JsonArray sessions = json["sessions"].to<JsonArray>();
+  int rowCount = 0;
+  while (result.next()) {
+    JsonObject s = sessions.add<JsonObject>();
+    s["id"]        = result.getValueByName("SessionId").getString().toInt();
+    s["startTime"] = result.getValueByName("first").getRawValue();
+    s["endTime"]   = result.getValueByName("last").getRawValue();
+    s["points"]    = result.getValueByName("count").getLong();
+    rowCount++;
+  }
+  String err = result.getError();
+  result.close();
+  releaseQueryLock();
+
+  if (!err.isEmpty()) {
+    log_e("handleGetSessions: query failed after %d row(s): %s", rowCount, err.c_str());
+    request->send(502, "application/json", "{\"error\":\"Query failed\"}");
+    return;
+  }
+
+  log_i("handleGetSessions: sending %d session(s)", rowCount);
+  String output;
+  serializeJson(json, output);
+  request->send(200, "application/json", output);
+}
+
+// Streams one firing session back as a CSV download. Scoped to this device's
+// own KilnName the same way handleGetSessions() is; the session id is the only
+// value the request contributes to the query, and it's validated as digits-only
+// up front (see fluxEscape() above for why that's the safety net here rather
+// than the InfluxDB client's `params` binding).
+void MyNetwork::handleDownloadSession(AsyncWebServerRequest* request) {
+  if (!request->hasParam("id")) {
+    request->send(400, "application/json", "{\"error\":\"Missing id parameter\"}");
+    return;
+  }
+  String idParam = request->getParam("id")->value();
+  if (idParam.isEmpty()) {
+    request->send(400, "application/json", "{\"error\":\"Invalid id\"}");
+    return;
+  }
+  for (size_t i = 0; i < idParam.length(); i++) {
+    if (!isDigit(idParam[i])) {
+      request->send(400, "application/json", "{\"error\":\"Invalid id\"}");
+      return;
+    }
+  }
+
+  InfluxDbConfig cfg;
+  String kilnName;
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  cfg = g_influxConfig;
+  kilnName = g_kilnName;
+  xSemaphoreGive(sharedMutex);
+
+  if (!cfg.configured) {
+    request->send(400, "application/json", "{\"error\":\"InfluxDB not configured\"}");
+    return;
+  }
+
+  if (!tryAcquireQueryLock()) {
+    request->send(503, "application/json", "{\"error\":\"Another query is already in progress\"}");
+    return;
+  }
+
+  // idParam was validated as digits-only above, so it's safe to inline
+  // unescaped in SessionCsvStream::start() — it can't contain a quote
+  // character to break out of the Flux string.
+  log_i("handleDownloadSession: querying session %s", idParam.c_str());
+
+  // Ownership: shared between every copy std::function makes of this lambda,
+  // and released only in ~SessionCsvStream() — see the struct's comment above
+  // for why cleanup can't live at the end of this function.
+  auto stream = std::make_shared<SessionCsvStream>(this);
+  if (!stream->start(cfg, kilnName, idParam)) {
+    request->send(502, "application/json", "{\"error\":\"Query failed\"}");
+    return; // stream's shared_ptr refcount drops to 0 here, running its cleanup
+  }
+
+  AsyncWebServerResponse* response = request->beginChunkedResponse(
+    "text/csv",
+    [stream](uint8_t* buf, size_t maxLen, size_t /*index*/) -> size_t {
+      return stream->fill(buf, maxLen);
+    });
+  if (response == nullptr) {
+    request->send(500, "application/json", "{\"error\":\"Out of memory\"}");
+    return; // stream's shared_ptr refcount drops to 0 here, running its cleanup
+  }
+  response->addHeader("Content-Disposition", "attachment; filename=\"session-" + idParam + ".csv\"");
+  request->send(response);
+}
+
 bool MyNetwork::hasNewInfluxCredentials() const {
   return receivedInfluxCredentials;
 }
 
 void MyNetwork::clearInfluxCredentialsFlag() {
   receivedInfluxCredentials = false;
+}
+
+void MyNetwork::releaseQueryLock() {
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  queryInProgress_ = false;
+  xSemaphoreGive(sharedMutex);
+}
+
+bool MyNetwork::tryAcquireQueryLock() {
+  // Generously longer than any legitimate session query should take — this
+  // exists purely so a leaked lock (a response object ESPAsyncWebServer
+  // never tore down, an unhandled edge case, etc.) self-heals instead of
+  // wedging the whole feature until reboot.
+  const unsigned long STALE_LOCK_MS = 3UL * 60UL * 1000UL;
+
+  xSemaphoreTake(sharedMutex, portMAX_DELAY);
+  bool busy = queryInProgress_;
+  if (busy && (millis() - queryLockAcquiredAt_) > STALE_LOCK_MS) {
+    log_w("Query lock held for over %lu ms with no release — treating as leaked, forcing it clear",
+          (unsigned long)(millis() - queryLockAcquiredAt_));
+    busy = false;
+  }
+  if (!busy) {
+    queryInProgress_ = true;
+    queryLockAcquiredAt_ = millis();
+  }
+  xSemaphoreGive(sharedMutex);
+  return !busy;
 }
 
 // Changes the captive mode, called from GUI

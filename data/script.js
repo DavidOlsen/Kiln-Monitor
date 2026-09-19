@@ -239,6 +239,41 @@ function displayTemperature(celsius, scale) {
   return scale === 'F' ? (celsius * 9.0 / 5.0 + 32.0) : celsius;
 }
 
+// Load and render this device's list of firing sessions (sessions.html)
+function loadSessions() {
+  const el = document.getElementById('sessionsList');
+  if (!el) return;
+  fetch('/getSessions')
+    .then(response => {
+      if (!response.ok) throw new Error('status ' + response.status);
+      return response.json();
+    })
+    .then(data => {
+      const sessions = data.sessions || [];
+      if (sessions.length === 0) {
+        el.innerHTML = '<p>No firing sessions recorded yet.</p>';
+        return;
+      }
+      sessions.sort((a, b) => b.id - a.id); // newest first
+      let html = '';
+      sessions.forEach(s => {
+        const start = s.startTime ? new Date(s.startTime).toLocaleString() : '?';
+        const end = s.endTime ? new Date(s.endTime).toLocaleString() : '?';
+        html += '<div class="program-card">' +
+          '<div class="card-info">' +
+          '<h3>Session ' + s.id + '</h3>' +
+          '<small>' + start + ' &ndash; ' + end + ' &middot; ' + s.points + ' points</small>' +
+          '</div>' +
+          '<button class="button-segment" onclick="window.location.href=\'/downloadSession?id=' + s.id + '\'">Download CSV</button>' +
+          '</div>';
+      });
+      el.innerHTML = html;
+    })
+    .catch(() => {
+      el.innerHTML = '<p>Failed to load sessions. Is InfluxDB configured?</p>';
+    });
+}
+
 // Poll live zone status (used by status.html)
 function refreshStatus() {
   fetch('/getStatus')

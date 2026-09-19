@@ -62,23 +62,13 @@ static void test_large_adc_without_status_bit_does_not_fault(void) {
     TEST_ASSERT_EQUAL_STRING("", r.errMsg);
 }
 
-// A shorted probe reports via MCP9601_STATUS_SHORTCIRCUIT (0x20) — a
-// dedicated MCP9601 capability the base MCP9600 has no equivalent for. Mirrors
-// the open-circuit fix but inverted: a short ties both TC leads together,
-// producing a near-zero EMF rather than a railed one, so it requires adcRaw
-// pinned near zero instead of far outside range. Unlike open circuit, this
-// threshold isn't field-validated against a real deliberate short yet.
-static void test_probe_shorted_short_circuit_bit_flags_fault(void) {
+// Short-circuit detection via MCP9601_STATUS_SHORTCIRCUIT (0x20) is disabled
+// for now: field data showed the bit's duty cycle on a genuinely shorted
+// probe overlaps the baseline flicker duty cycle on a healthy probe at rest,
+// even over short debounce windows, so it can't be told apart from noise
+// without a hardware change. The bit is deliberately ignored until then.
+static void test_short_circuit_bit_alone_does_not_fault(void) {
     ZoneFaultResult r = evaluateZoneFault(25.0f, MCP9601_STATUS_SHORTCIRCUIT, 0);
-    TEST_ASSERT_TRUE(r.faulted);
-    TEST_ASSERT_EQUAL_STRING("Probe shorted (short circuit)", r.errMsg);
-}
-
-// Regression test for the same class of false positive reported on open
-// circuit: the short-circuit bit flickering on a connected probe that's
-// actually reading a real, non-trivial signal. Should NOT fault.
-static void test_short_circuit_bit_with_real_signal_does_not_fault(void) {
-    ZoneFaultResult r = evaluateZoneFault(500.0f, MCP9601_STATUS_SHORTCIRCUIT, 5000);
     TEST_ASSERT_FALSE(r.faulted);
     TEST_ASSERT_EQUAL_STRING("", r.errMsg);
 }
@@ -124,8 +114,7 @@ void setup() {
     RUN_TEST(test_open_circuit_stale_reading_with_large_adc_flags_fault);
     RUN_TEST(test_open_circuit_bit_with_small_adc_does_not_fault);
     RUN_TEST(test_large_adc_without_status_bit_does_not_fault);
-    RUN_TEST(test_probe_shorted_short_circuit_bit_flags_fault);
-    RUN_TEST(test_short_circuit_bit_with_real_signal_does_not_fault);
+    RUN_TEST(test_short_circuit_bit_alone_does_not_fault);
     RUN_TEST(test_no_probe_nan_reading_flags_fault);
     RUN_TEST(test_out_of_range_reading_flags_fault);
     RUN_TEST(test_normal_reading_no_fault);
