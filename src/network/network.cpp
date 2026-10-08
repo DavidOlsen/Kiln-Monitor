@@ -745,6 +745,7 @@ void MyNetwork::setupServer() {
     }
     json["loggingActive"]   = g_loggingActive;
     json["ambientBaseline"] = g_ambientBaseline;
+    json["maxTemperature"]  = g_maxTemperature;
     json["tcType"]          = String(g_tcType);
     json["tempScale"]       = String(g_tempScale);
     xSemaphoreGive(sharedMutex);

@@ -74,6 +74,12 @@ extern bool g_loggingActive;           // True while a test run is actively bein
 extern uint32_t g_sessionId;           // Increments on each WAITING->LOGGING transition; persisted in NVS across resets
 extern String g_kilnName;              // User-set label tagged onto InfluxDB points, so multiple kilns can be told apart
 
+// Peak PV (Celsius) seen across active zones during the current logging run;
+// reset when a new session starts, otherwise holds the last completed
+// session's peak. -1000 means no session has run yet this boot (matches the
+// same sentinel convention as updateLoggingTrigger()'s local maxPV).
+extern double g_maxTemperature;
+
 // Fallback for g_kilnName when the user hasn't set one. g_kilnName must
 // never be empty — InfluxDB tags are only written when non-empty (see
 // telemetry.cpp), so an empty name means points silently lose the KilnName

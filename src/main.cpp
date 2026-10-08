@@ -27,6 +27,7 @@ bool g_loggingActive;
 char g_tempScale = 'C';
 uint32_t g_sessionId = 0;
 String g_kilnName;
+double g_maxTemperature = -1000;
 
 // External objects initialization
 InfluxDbConfig g_influxConfig;

@@ -274,6 +274,38 @@ function loadSessions() {
     });
 }
 
+// Orton pyrometric cone equivalents — Large Cones, Regular composition,
+// 108°F/hr (60°C/hr) heating rate, in Celsius (matches the raw units
+// /getStatus reports temperatures in). Source: Edward Orton Jr. Ceramic
+// Foundation, "Temperature Equivalent Chart for Orton Pyrometric Cones",
+// cone numbers 022-14 (ortonceramic.com) — table capped at cone 12 here,
+// which covers the practical range for this kind of kiln; cones 13/14 use a
+// different composition per Orton's own chart and aren't included. This is
+// a peak-temperature approximation, not true heat-work — a cone's actual
+// bending also depends on soak time and heating rate, so treat it as a
+// rough guide alongside a real witness cone, not a replacement for one.
+const ORTON_CONE_CHART_C = [
+  ['019', 676], ['018', 712], ['017', 736], ['016', 769], ['015', 788],
+  ['014', 807], ['013', 837], ['012', 858], ['011', 873], ['010', 898],
+  ['09', 917], ['08', 942], ['07', 973], ['06', 995], ['05', 1030],
+  ['04', 1060], ['03', 1086], ['02', 1101], ['01', 1117], ['1', 1136],
+  ['2', 1142], ['3', 1152], ['4', 1160], ['5', 1184], ['6', 1220],
+  ['7', 1237], ['8', 1247], ['9', 1257], ['10', 1282], ['11', 1293],
+  ['12', 1304]
+];
+
+// Highest Orton cone reached at a given peak Celsius temperature — null
+// below the chart's lowest cone (019), '12+' at or above its highest (12).
+function celsiusToOrtonCone(celsius) {
+  if (celsius < ORTON_CONE_CHART_C[0][1]) return null;
+  let reached = ORTON_CONE_CHART_C[0][0];
+  for (const [cone, temp] of ORTON_CONE_CHART_C) {
+    if (celsius >= temp) reached = cone; else break;
+  }
+  const top = ORTON_CONE_CHART_C[ORTON_CONE_CHART_C.length - 1];
+  return celsius >= top[1] ? top[0] + '+' : reached;
+}
+
 // Poll live zone status (used by status.html)
 function refreshStatus() {
   fetch('/getStatus')
@@ -286,6 +318,11 @@ function refreshStatus() {
       const badgeClass = data.loggingActive ? 'badge-active' : 'badge-waiting';
       let html = '<p><span class="badge ' + badgeClass + '">' + (data.loggingActive ? 'LOGGING ACTIVE' : 'WAITING') + '</span></p>';
       html += '<p>Ambient baseline: ' + displayTemperature(data.ambientBaseline, scale).toFixed(1) + unit + ' &mdash; TC type: ' + data.tcType + '</p>';
+      if (typeof data.maxTemperature === 'number' && data.maxTemperature > -900) {
+        const maxDisplay = displayTemperature(data.maxTemperature, scale).toFixed(1) + unit;
+        const cone = celsiusToOrtonCone(data.maxTemperature);
+        html += '<p>Max temperature: ' + maxDisplay + ' &mdash; ' + (cone ? ('~Cone ' + cone) : 'below cone 019') + '</p>';
+      }
       html += '<ul class="zone-list">';
       data.zones.forEach((z, i) => {
         if (!z.active) return;

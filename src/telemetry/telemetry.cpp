@@ -50,11 +50,21 @@ static void updateLoggingTrigger() {
       newSessionId = g_sessionId;
       kilnName = g_kilnName;
       sessionStarted = true;
+      g_maxTemperature = maxPV; // seed this run's peak — see below for why it isn't reset elsewhere
       log_i("Logging started: zone at %.1f, ambient %.1f (session %u)", maxPV, ambient, g_sessionId);
     } else if (loggingActive && count > 0 && allReturned) {
       g_loggingActive = false;
       g_ambientBaseline = avg; // re-baseline so a repeat test doesn't need a reboot
       log_i("Logging stopped: zones back to ambient (%.1f)", avg);
+    }
+
+    // Tracks the running peak for the display (status page: degrees + Orton
+    // cone equivalent). Deliberately not reset when logging stops — it's
+    // meant to keep showing the just-completed run's peak until the next
+    // session starts and re-seeds it above, not blank out the moment a
+    // firing ends.
+    if (loggingActive && maxPV > g_maxTemperature) {
+      g_maxTemperature = maxPV;
     }
   }
   xSemaphoreGive(mutex);
@@ -79,8 +89,26 @@ void telemetry_task(void* parameter) {
   bool connected = false;
   bool prevConnected = false;
   bool published = false;
+  unsigned long lastDiagLog = 0;
 
   while (1) {
+
+    // Heap trend, logged unconditionally (ahead of every early `continue`
+    // below, including the WiFi-down path) so it keeps running through
+    // whatever state the device is in. Added to chase a report of the
+    // device refusing new HTTP connections after a few days of uptime with
+    // no trace captured from the actual failure — this is deliberately
+    // simple (free/max-alloc heap + uptime) rather than trying to walk
+    // lwIP's internal TCP PCB list, which isn't exposed through a stable
+    // Arduino-layer API. A steadily falling free-heap trend over days would
+    // confirm a heap leak; a flat trend alongside the same symptom would
+    // point instead at TCP connection/PCB exhaustion, which doesn't show up
+    // in heap stats at all. Either result narrows the next step.
+    if (millis() - lastDiagLog >= 300000) {
+      lastDiagLog = millis();
+      log_i("Diag: uptime=%lus freeHeap=%u maxAlloc=%u",
+            (unsigned long)(millis() / 1000), ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    }
 
     updateLoggingTrigger();
 
