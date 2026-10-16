@@ -17,6 +17,87 @@ Point sensor("KILN MONITOR");
 // whether to publish. See EKcommon.h for AMBIENT_START_DELTA/AMBIENT_STOP_DELTA.
 static bool ambientCaptured = false;
 
+// Rolling history of the max active-zone temperature, sampled roughly once a
+// minute, kept entirely in RAM so ramp-rate math never has to touch
+// InfluxDB — see getRampRate()'s comment for why that matters on this
+// project. 240 samples at 1/min covers 4 hours; a plain circular buffer
+// (write pointer + count) rather than a timestamp-indexed structure, since
+// scanning <=240 entries is trivial on this hardware and avoids any
+// wraparound bookkeeping beyond what unsigned millis() subtraction already
+// handles for free.
+namespace {
+  const int TEMP_HISTORY_CAPACITY = 240;
+  const unsigned long TEMP_HISTORY_INTERVAL_MS = 60000; // 1 sample/minute
+
+  struct TempSample { unsigned long timeMs; double value; };
+  TempSample tempHistory[TEMP_HISTORY_CAPACITY];
+  int tempHistoryCount = 0;      // valid entries so far, caps at CAPACITY
+  int tempHistoryWriteIndex = 0; // next slot to write; once full, also the oldest entry
+  unsigned long lastHistorySampleMs = 0;
+
+  // Appends a sample if enough time has passed since the last one. Tracks
+  // regardless of g_loggingActive — watching the ramp climb during preheat,
+  // before the auto-start threshold trips, is exactly the point.
+  void recordTempHistorySample(double maxPV, unsigned long nowMs) {
+    if (lastHistorySampleMs != 0 && (nowMs - lastHistorySampleMs) < TEMP_HISTORY_INTERVAL_MS) return;
+    lastHistorySampleMs = nowMs;
+    tempHistory[tempHistoryWriteIndex] = {nowMs, maxPV};
+    tempHistoryWriteIndex = (tempHistoryWriteIndex + 1) % TEMP_HISTORY_CAPACITY;
+    if (tempHistoryCount < TEMP_HISTORY_CAPACITY) tempHistoryCount++;
+  }
+}
+
+double getRampRate(uint32_t windowMinutes) {
+  xSemaphoreTake(mutex, portMAX_DELAY);
+
+  // "Now" is the freshest live reading, not the most recent history sample
+  // (which can lag by up to ~1 minute) — keeps the rate current even
+  // between samples.
+  double currentMax = -1000;
+  bool haveCurrent = false;
+  for (int i = 0; i < MAX_ZONES; i++) {
+    if (!g_zones[i].active || g_zones[i].fault) continue;
+    if (g_zones[i].pv > currentMax) currentMax = g_zones[i].pv;
+    haveCurrent = true;
+  }
+
+  if (!haveCurrent || tempHistoryCount == 0) {
+    xSemaphoreGive(mutex);
+    return NAN;
+  }
+
+  unsigned long now = millis();
+  unsigned long targetAgeMs = (unsigned long)windowMinutes * 60000UL;
+  int startIndex = (tempHistoryCount < TEMP_HISTORY_CAPACITY) ? 0 : tempHistoryWriteIndex;
+
+  // Not enough history yet to cover this window — e.g. a 4-hour rate asked
+  // for 10 minutes after boot.
+  if ((now - tempHistory[startIndex].timeMs) < targetAgeMs) {
+    xSemaphoreGive(mutex);
+    return NAN;
+  }
+
+  // Find the recorded sample closest to (now - targetAgeMs).
+  unsigned long bestDiff = 0xFFFFFFFFUL;
+  double refValue = 0;
+  unsigned long refTime = 0;
+  for (int i = 0; i < tempHistoryCount; i++) {
+    int idx = (startIndex + i) % TEMP_HISTORY_CAPACITY;
+    unsigned long age = now - tempHistory[idx].timeMs;
+    unsigned long diff = (age > targetAgeMs) ? (age - targetAgeMs) : (targetAgeMs - age);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      refValue = tempHistory[idx].value;
+      refTime = tempHistory[idx].timeMs;
+    }
+  }
+  xSemaphoreGive(mutex);
+
+  double elapsedHours = (double)(now - refTime) / 3600000.0;
+  if (elapsedHours <= 0.0001) return NAN;
+  return (currentMax - refValue) / elapsedHours;
+}
+
 static void updateLoggingTrigger() {
   bool sessionStarted = false;
   uint32_t newSessionId = 0;
@@ -66,6 +147,8 @@ static void updateLoggingTrigger() {
     if (loggingActive && maxPV > g_maxTemperature) {
       g_maxTemperature = maxPV;
     }
+
+    recordTempHistorySample(maxPV, millis());
   }
   xSemaphoreGive(mutex);
 

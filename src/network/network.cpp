@@ -1,10 +1,12 @@
 #include "network.h"
 #include <ESPmDNS.h>
+#include <math.h> // isnan(), for the ramp-rate fields in /getStatus
 #include <InfluxDbClient.h> // for timeSync() — NTP sync independent of InfluxDB configuration
 #include <InfluxDbCloud.h>  // InfluxDbCloud2CACert, used by the session-list query client below
 #include <HTTPClient.h>     // used directly (not via the InfluxDB client lib) for the CSV download — see SessionCsvStream
 #include <memory>
 #include <vector>
+#include "../telemetry/telemetry.h" // getRampRate() — in-memory, not an InfluxDB query, for /getStatus
 
 #ifndef OTA_VERSION
   #define OTA_VERSION "local_development"
@@ -735,6 +737,15 @@ void MyNetwork::setupServer() {
   // Live status: zone readings + logging state, for a status web page
   server.on("/getStatus", HTTP_GET, [this](AsyncWebServerRequest* request) {
     JsonDocument json;
+
+    // getRampRate() takes the same shared mutex internally (it reads
+    // g_zones directly for the "current" side of the rate) — called here,
+    // before sharedMutex is taken below, to avoid a same-task double-take
+    // deadlock, since that mutex isn't recursive.
+    double ramp30m = getRampRate(30);
+    double ramp1h  = getRampRate(60);
+    double ramp4h  = getRampRate(240);
+
     xSemaphoreTake(sharedMutex, portMAX_DELAY);
     JsonArray zones = json["zones"].to<JsonArray>();
     for (int i = 0; i < MAX_ZONES; i++) {
@@ -749,6 +760,13 @@ void MyNetwork::setupServer() {
     json["tcType"]          = String(g_tcType);
     json["tempScale"]       = String(g_tempScale);
     xSemaphoreGive(sharedMutex);
+
+    // null (rather than omitted) when there isn't enough history yet for
+    // that window, so the frontend can tell "zero" apart from "unknown".
+    if (isnan(ramp30m)) json["rampRate30m"] = nullptr; else json["rampRate30m"] = ramp30m;
+    if (isnan(ramp1h))  json["rampRate1h"]  = nullptr; else json["rampRate1h"]  = ramp1h;
+    if (isnan(ramp4h))  json["rampRate4h"]  = nullptr; else json["rampRate4h"]  = ramp4h;
+
     String output;
     serializeJson(json, output);
     request->send(200, "application/json", output);

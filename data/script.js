@@ -239,6 +239,14 @@ function displayTemperature(celsius, scale) {
   return scale === 'F' ? (celsius * 9.0 / 5.0 + 32.0) : celsius;
 }
 
+// Converts a Celsius *delta* (e.g. a ramp rate, degrees/hour) for display.
+// Deliberately separate from displayTemperature() — a delta scales by 9/5
+// for °F but must NOT get the +32 offset, since that's only valid for an
+// absolute temperature, not a difference between two of them.
+function displayTemperatureDelta(deltaCelsius, scale) {
+  return scale === 'F' ? (deltaCelsius * 9.0 / 5.0) : deltaCelsius;
+}
+
 // Load and render this device's list of firing sessions (sessions.html)
 function loadSessions() {
   const el = document.getElementById('sessionsList');
@@ -306,6 +314,16 @@ function celsiusToOrtonCone(celsius) {
   return celsius >= top[1] ? top[0] + '+' : reached;
 }
 
+// Formats one ramp-rate window for the status page. rateCelsiusPerHour is
+// null until /getStatus has accumulated enough history to cover that
+// window (e.g. the 4h figure stays null for the first 4 hours after boot).
+function formatRampRate(rateCelsiusPerHour, scale, label) {
+  if (typeof rateCelsiusPerHour !== 'number') return label + ': collecting data&hellip;';
+  const rate = displayTemperatureDelta(rateCelsiusPerHour, scale);
+  const sign = rate >= 0 ? '+' : '';
+  return label + ': ' + sign + rate.toFixed(0) + '&deg;' + scale + '/hr';
+}
+
 // Poll live zone status (used by status.html)
 function refreshStatus() {
   fetch('/getStatus')
@@ -323,6 +341,9 @@ function refreshStatus() {
         const cone = celsiusToOrtonCone(data.maxTemperature);
         html += '<p>Max temperature: ' + maxDisplay + ' &mdash; ' + (cone ? ('~Cone ' + cone) : 'below cone 019') + '</p>';
       }
+      html += '<p>Ramp rate: ' + formatRampRate(data.rampRate30m, scale, '30m') + ' &middot; ' +
+        formatRampRate(data.rampRate1h, scale, '1h') + ' &middot; ' +
+        formatRampRate(data.rampRate4h, scale, '4h') + '</p>';
       html += '<ul class="zone-list">';
       data.zones.forEach((z, i) => {
         if (!z.active) return;
